@@ -647,10 +647,10 @@
                             </div>
                         </div>
 
-                        <!-- 3 Day Forecast -->
+                        <!-- 10 Day Forecast -->
                         <div class="w-full mt-12">
-                            <span class="text-sm font-bold opacity-50 mb-6 block">3-DAY FORECAST</span>
-                            <div id="forecast-container" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <span class="text-sm font-bold opacity-50 mb-6 block">10-DAY FORECAST</span>
+                            <div id="forecast-container" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-6">
                                 <!-- Injected JS as Cards -->
                             </div>
                         </div>
@@ -2792,7 +2792,7 @@
 
             try {
                 // Open-Meteo Forecast (minimal, widely-supported set; no moon_phase)
-                var url = `https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current_weather=true&hourly=temperature_2m,apparent_temperature,relativehumidity_2m,surface_pressure,visibility,cloudcover,precipitation,rain,showers,snowfall,windspeed_10m,winddirection_10m,uv_index&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max&forecast_days=4&timezone=auto`;
+                var url = `https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current_weather=true&hourly=temperature_2m,apparent_temperature,relativehumidity_2m,surface_pressure,visibility,cloudcover,precipitation,rain,showers,snowfall,windspeed_10m,winddirection_10m,uv_index&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset,uv_index_max&forecast_days=11&timezone=auto`;
                 var res = await fetch(url);
                 if (!res.ok) throw new Error('HTTP_' + res.status);
                 var data = await res.json();
@@ -3132,18 +3132,23 @@
             // Helper to parse daily date strings (avoid timezone shifting to previous day)
             function localDayName(dateStr) {
                 var parts = dateStr.split('-');
+                var dt;
                 if (parts.length === 3) {
                     var y = parseInt(parts[0], 10);
                     var m = parseInt(parts[1], 10) - 1;
                     var d = parseInt(parts[2], 10);
-                    var dt = new Date(y, m, d); // local date (no UTC shift)
-                    return dt.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+                    dt = new Date(y, m, d); // local date (no UTC shift)
+                } else {
+                    dt = new Date(dateStr);
                 }
-                return new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+                var wd = dt.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+                var dayNum = String(dt.getDate()).padStart(2, '0');
+                return `${wd} ${dayNum}`;
             }
 
-            // Show next 3 days safely (index 1,2,3) if available
-            var maxForecastDays = Math.min(4, daily.time.length); // up to index 3
+            // Show next 10 days (skip today at index 0)
+            var daysToShow = 10;
+            var maxForecastDays = Math.min(1 + daysToShow, daily.time.length); // indices 1..daysToShow
             for (let i = 1; i < maxForecastDays; i++) {
                 let code = daily.weathercode[i];
                 let info = weatherCodeMap[code] || { icon: 'wi wi-day-sunny' };
@@ -3156,16 +3161,16 @@
                 let dayName = localDayName(daily.time[i]);
                 
                 let div = document.createElement('div');
-                div.className = "weather-card interactive p-6 flex flex-col items-center justify-between gap-4 cursor-pointer group";
+                div.className = "weather-card interactive p-5 flex flex-col items-center justify-between gap-3 cursor-pointer group";
                 div.onclick = () => showDailyDetail(i);
                 
                 div.innerHTML = `
                     <div class="flex items-center gap-2">
-                        <i class="${info.icon} text-4xl text-accent"></i>
-                        <span class="font-bold text-2xl">${dayName}</span>
+                        <i class="${info.icon} text-3xl text-accent"></i>
+                        <span class="font-bold text-xl whitespace-nowrap">${dayName}</span>
                     </div>
-                    <div class="font-bold text-3xl">
-                        ${Math.round(max)}°<span class="opacity-50 text-xl mx-2">/</span><span class="opacity-50 text-2xl">${Math.round(min)}°</span>
+                    <div class="font-bold text-2xl">
+                        ${Math.round(max)}°<span class="opacity-50 text-lg mx-2">/</span><span class="opacity-50 text-xl">${Math.round(min)}°</span>
                     </div>
                 `;
                 els.forecast.appendChild(div);
