@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MonoWeather</title>
-    <link rel="icon" type="image/svg" href="favicon.svg"/>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,6 +15,13 @@
     <!-- Leaflet (for Radar Map) -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Firebase (Account Sync): load once so the auth UI doesn't show OFFLINE due to blocked dynamic script injection. -->
+    <script defer src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script defer src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+    <script defer src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+    <!-- Cloud Sync (optional): If config is present, auto-initializes on page load. -->
     <style>
         :root {
             --accent-color: #f97316;
@@ -453,6 +459,11 @@
                         
                         <!-- Main Card -->
                         <div class="w-full border-4 border-[var(--text-color)] border-l-[16px] border-l-accent bg-[var(--card-bg)] p-8 relative shadow-[8px_8px_0px_rgba(0,0,0,0.1)] mb-12">
+                            <div class="flex items-center justify-between mb-4">
+                                <div id="provider-badge" class="hidden text-xs font-bold tracking-widest px-3 py-1 border-2 border-[var(--text-color)] bg-[var(--bg-color)]">
+                                    AMBIENT_WEATHER • LIVE_STATION
+                                </div>
+                            </div>
                             <div class="flex flex-row justify-between items-start sm:items-center gap-4 md:gap-8">
                                 <!-- Left: Location & Description -->
                                 <div class="flex-1 min-w-0">
@@ -880,6 +891,98 @@
                             <button data-color="#ef4444" class="aspect-square bg-red-500 border-4 border-transparent hover:scale-105 transition-transform shadow-lg"></button>
                         </div>
                     </div>
+
+                    <!-- Ambient Weather (Optional, requires sign-in) -->
+                    <div class="weather-card p-6 md:p-8">
+                        <div class="flex items-start justify-between gap-6">
+                            <div>
+                                <h3 class="font-bold text-2xl flex items-center gap-4"><i class="ti ti-satellite"></i> DATA_SOURCE</h3>
+                                <p class="mt-2 text-sm opacity-70 font-bold leading-relaxed" id="provider-hint">
+                                    OPEN_METEO_DEFAULT • AMBIENT_REQUIRES_SIGN_IN
+                                </p>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xs font-bold opacity-60 tracking-widest">ACTIVE</div>
+                                <div id="provider-status" class="text-sm font-bold text-accent">OPEN_METEO</div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 flex flex-col md:flex-row gap-3">
+                            <button id="provider-openmeteo" class="flex-1 py-4 border-4 border-[var(--text-color)] font-bold transition-colors">OPEN_METEO</button>
+                            <button id="provider-ambient" class="flex-1 py-4 border-4 border-[var(--text-color)] font-bold transition-colors">AMBIENT_WEATHER</button>
+                        </div>
+
+                        <div id="ambient-settings" class="mt-6 space-y-5 hidden">
+                            <div class="text-xs font-bold opacity-60 tracking-widest">AMBIENT_KEYS</div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">APPLICATION_KEY</div>
+                                    <input id="ambient-app-key" type="password" placeholder="APP_KEY" class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none">
+                                </div>
+                                <div>
+                                    <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">API_KEY</div>
+                                    <input id="ambient-api-key" type="password" placeholder="API_KEY" class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none">
+                                </div>
+                            </div>
+
+                            <div class="flex flex-col md:flex-row gap-3 md:items-end">
+                                <div class="flex-1">
+                                    <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">STATION_DEVICE</div>
+                                    <select id="ambient-device" class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none">
+                                        <option value="">NO_DEVICES_LOADED</option>
+                                    </select>
+                                </div>
+                                <button id="ambient-refresh" class="md:w-48 py-4 border-4 border-[var(--text-color)] font-bold transition-colors hover:bg-accent hover:text-white">REFRESH_DEVICES</button>
+                            </div>
+
+                            <div>
+                                <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">FORECAST_CITY</div>
+                                <div class="relative">
+                                    <input id="ambient-city-search" type="text" placeholder="SEARCH CITY..." class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none uppercase">
+                                    <div id="ambient-city-dropdown" class="absolute top-full left-0 w-full bg-[var(--card-bg)] border-4 border-t-0 border-[var(--text-color)] hidden shadow-2xl max-h-72 overflow-y-auto z-[60]"></div>
+                                </div>
+                                <div class="mt-2 text-xs opacity-60 font-bold">USED_FOR_FORECAST_&_RADAR_TARGET • HOME_SHOWS_AMBIENT_CURRENT_CONDITIONS</div>
+                            </div>
+
+                            <div id="ambient-msg" class="text-xs font-bold text-red-500 min-h-[1.25rem]"></div>
+                        </div>
+                    </div>
+
+                    <!-- Account Sync (Optional) -->
+                    <div class="weather-card p-6 md:p-8">
+                        <div class="flex items-start justify-between gap-6">
+                            <div>
+                                <h3 class="font-bold text-2xl flex items-center gap-4"><i class="ti ti-cloud-lock"></i> ACCOUNT_SYNC</h3>
+                                <p class="mt-2 text-sm opacity-70 font-bold leading-relaxed">
+                                    OPTIONAL • SIGN IN TO SYNC SETTINGS ACROSS DEVICES
+                                </p>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xs font-bold opacity-60 tracking-widest">STATUS</div>
+                                <div id="account-status" class="text-sm font-bold text-accent">OFFLINE</div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">EMAIL</div>
+                                <input id="account-email" type="email" placeholder="you@example.com" class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none">
+                            </div>
+                            <div>
+                                <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">PASSWORD</div>
+                                <input id="account-password" type="password" placeholder="••••••••" class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none">
+                            </div>
+                        </div>
+
+                        <div class="mt-4 flex flex-col md:flex-row gap-3">
+                            <button id="account-signup" class="flex-1 py-4 border-4 border-[var(--text-color)] font-bold transition-colors hover:bg-accent hover:text-white">CREATE_ACCOUNT</button>
+                            <button id="account-login" class="flex-1 py-4 border-4 border-[var(--text-color)] font-bold transition-colors hover:bg-accent hover:text-white">SIGN_IN</button>
+                            <button id="account-logout" class="flex-1 py-4 border-4 border-[var(--text-color)] font-bold transition-colors hover:bg-accent hover:text-white">SIGN_OUT</button>
+                        </div>
+
+
+                        <div id="account-msg" class="mt-3 text-xs font-bold text-red-500 min-h-[1.25rem]"></div>
+                    </div>
                 </div>
             </section>
 
@@ -993,6 +1096,20 @@
     </dialog>
 
     <script>
+        // --- Production-style Firebase config (hard-coded; no user paste) ---
+        // Paste your Firebase Web App config here (Firebase Console → Project Settings → Your Apps → Web App → Config)
+        // NOTE: This config is NOT a secret. Secrets stay server-side in Firebase rules.
+        // When filled, account sync will auto-initialize on page load.
+        window.MONO_FIREBASE_CONFIG = window.MONO_FIREBASE_CONFIG || {
+            apiKey: "AIzaSyDJyYw0gi7XHa47pfD5e4LPXbtNZxBcoq0",
+            authDomain: "monoweather-f1f57.firebaseapp.com",
+            projectId: "monoweather-f1f57",
+            appId: "1:1037712965976:web:79994c7cbba4f5cd3ba52d",
+            storageBucket: "monoweather-f1f57.firebasestorage.app",
+            messagingSenderId: "1037712965976"
+            // measurementId is optional and not needed for Auth/Firestore
+        };
+
         // --- Cookies + Storage (settings + city persistence) ---
         function setCookie(name, value, days) {
             try {
@@ -1027,6 +1144,12 @@
         function persistStore(key, value, days) {
             try { localStorage.setItem(key, value); } catch (e) {}
             setCookie(key, value, days || 365);
+            // Optional account sync (no-op unless configured + signed in)
+            try {
+                if (window.cloudSync && !window.cloudSync._suspendPush && typeof window.cloudSync._schedulePush === 'function') {
+                    window.cloudSync._schedulePush();
+                }
+            } catch (e) {}
         }
 
         // --- Globals ---
@@ -1041,6 +1164,21 @@
             timeFormat: readStore('mw_time', '24'),
             theme: readStore('mw_theme', 'light'),
             accent: readStore('mw_accent', '#f97316'),
+
+            // Data provider
+            provider: readStore('mw_provider', 'openmeteo'),
+            ambient: {
+                appKey: readStore('mw_ambient_appkey', ''),
+                apiKey: readStore('mw_ambient_apikey', ''),
+                deviceMac: readStore('mw_ambient_device', ''),
+                // City to use for Open-Meteo forecast/radar target when Ambient is active
+                forecastCity: null,
+                // Cached device list and latest data
+                devices: null,
+                lastData: null,
+                lastFetchAt: null
+            },
+
             weatherData: null,
             cityData: null,
 
@@ -1162,6 +1300,367 @@
         
         var els = {};
 
+        // --- Optional Cloud Sync (Firebase Auth + Firestore) ---
+        // This is optional: the app works fully without it.
+        // To enable, paste Firebase config JSON in Settings and click APPLY_CONFIG.
+
+        // Firebase SDK scripts are loaded in <head> (defer). No dynamic injection needed.
+        function loadFirebaseCompat() {
+            return Promise.resolve(true);
+        }
+
+        window.cloudSync = (function(){
+            var app = null;
+            var auth = null;
+            var db = null;
+            var user = null;
+            var inited = false;
+            var pushTimer = null;
+
+            function setStatus(text, ok) {
+                try {
+                    if (els.accountStatus) {
+                        els.accountStatus.innerText = text;
+                        els.accountStatus.classList.toggle('text-accent', !!ok);
+                        els.accountStatus.classList.toggle('text-red-500', !ok);
+                    }
+                } catch (e) {}
+            }
+
+            function msg(text, isError) {
+                try {
+                    if (els.accountMsg) {
+                        els.accountMsg.innerText = text || '';
+                        els.accountMsg.classList.toggle('text-red-500', !!isError);
+                        els.accountMsg.classList.toggle('text-accent', !isError);
+                    }
+                } catch (e) {}
+            }
+
+            function friendlyErr(e) {
+                try {
+                    if (!e) return 'Something went wrong.';
+                    // Prefer Firebase error codes when available
+                    var code = e.code || '';
+                    if (code) {
+                        var map = {
+                            'auth/email-already-in-use': 'Email already in use.',
+                            'auth/invalid-email': 'Invalid email address.',
+                            'auth/weak-password': 'Password is too weak.',
+                            'auth/wrong-password': 'Incorrect password.',
+                            'auth/user-not-found': 'Account not found.',
+                            'auth/too-many-requests': 'Too many attempts. Try again later.',
+                            'auth/network-request-failed': 'Network error. Check your connection.'
+                        };
+                        if (map[code]) return map[code];
+                        // Fallback: make code readable
+                        return code.replace(/^auth\//, '').replace(/-/g, ' ') + '.';
+                    }
+                    var m = (e.message || String(e) || '').trim();
+                    m = m.replace(/^Firebase(?:Error)?:\s*/i, '').replace(/^FirebaseError:\s*/i, '');
+                    return m || 'Something went wrong.';
+                } catch (err) {
+                    return 'Something went wrong.';
+                }
+            }
+
+            function readFirebaseConfig() {
+                // Production-style option: hard-code config (no user paste needed)
+                // Example (in your own build/deploy): window.MONO_FIREBASE_CONFIG = {...};
+                try {
+                    if (window.MONO_FIREBASE_CONFIG && window.MONO_FIREBASE_CONFIG.apiKey && window.MONO_FIREBASE_CONFIG.projectId) {
+                        return { cfg: window.MONO_FIREBASE_CONFIG, raw: JSON.stringify(window.MONO_FIREBASE_CONFIG) };
+                    }
+                } catch (e) {}
+
+                // Demo / static setup: prefer textarea content; fallback to stored.
+                var raw = null;
+                try {
+                    raw = (els.firebaseConfig && els.firebaseConfig.value && els.firebaseConfig.value.trim())
+                        ? els.firebaseConfig.value.trim()
+                        : readStore('mw_firebase_config', null);
+                } catch (e) {
+                    raw = readStore('mw_firebase_config', null);
+                }
+                if (!raw) return null;
+                try {
+                    var cfg = JSON.parse(raw);
+                    if (!cfg || !cfg.apiKey || !cfg.projectId) return null;
+                    return { cfg: cfg, raw: raw };
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            async function initFirebase() {
+                var cfgWrap = readFirebaseConfig();
+                if (!cfgWrap) {
+                    setStatus('OFFLINE', false);
+                    return false;
+                }
+
+                try {
+                    // Persist raw config locally only when it did not come from hard-coded config.
+                    try {
+                        var isHardcoded = !!(window.MONO_FIREBASE_CONFIG && window.MONO_FIREBASE_CONFIG.apiKey && window.MONO_FIREBASE_CONFIG.projectId);
+                        if (!isHardcoded) persistStore('mw_firebase_config', cfgWrap.raw);
+                    } catch (ePersist) {}
+
+                    // Lazy-load Firebase SDK if needed
+                    if (!(window.firebase && window.firebase.initializeApp)) {
+                        msg('LOADING_FIREBASE...', false);
+                        await loadFirebaseCompat();
+                    }
+
+                    if (!window.firebase || !window.firebase.initializeApp) {
+                        msg('FIREBASE_NOT_LOADED', true);
+                        setStatus('OFFLINE', false);
+                        return false;
+                    }
+
+                    // Initialize (or reuse) Firebase app + services.
+                    // This must be idempotent: init can be triggered more than once by retry logic.
+                    if (!app) {
+                        try {
+                            if (window.firebase.apps && window.firebase.apps.length) {
+                                app = window.firebase.app();
+                            }
+                        } catch (eApp) {}
+                        if (!app) {
+                            app = window.firebase.initializeApp(cfgWrap.cfg);
+                        }
+                    }
+
+                    if (!auth) auth = window.firebase.auth();
+                    if (!db) db = window.firebase.firestore();
+
+                    // Register auth listener only once
+                    if (!inited && auth) {
+                        auth.onAuthStateChanged(function(u){
+                            user = u || null;
+                            if (user) {
+                                setStatus('SIGNED_IN', true);
+                                // Auto-restore on sign-in
+                                try {
+                                    msg('Restoring settings...', false);
+                                    restoreFromCloud(true);
+                                } catch (e) {
+                                    msg('Signed in.', false);
+                                }
+                            } else {
+                                setStatus('READY', true);
+                                msg('', false);
+                            }
+                        });
+                        inited = true;
+                    }
+
+                    setStatus('READY', true);
+                    msg('', false);
+                    return true;
+                } catch (e) {
+                    console.error(e);
+                    msg('CONFIG_FAILED', true);
+                    setStatus('OFFLINE', false);
+                    return false;
+                }
+            }
+
+            function isReady() {
+                return !!(inited && auth && db);
+            }
+
+            function requireUser() {
+                if (!isReady()) { msg('Cloud sync not configured.', true); return null; }
+                if (!auth.currentUser) { msg('Please sign in.', true); return null; }
+                return auth.currentUser;
+            }
+
+            function snapshotLocal() {
+                // Store only the settings/city we already persist locally
+                var payload = {
+                    v: 1,
+                    updatedAt: Date.now(),
+                    settings: {
+                        mw_unit: readStore('mw_unit', 'c'),
+                        mw_wind_unit: readStore('mw_wind_unit', 'kmh'),
+                        mw_time: readStore('mw_time', '24'),
+                        mw_theme: readStore('mw_theme', 'light'),
+                        mw_accent: readStore('mw_accent', '#f97316'),
+                        // Provider
+                        mw_provider: readStore('mw_provider', 'openmeteo'),
+                        // Ambient credentials + selection
+                        mw_ambient_appkey: readStore('mw_ambient_appkey', ''),
+                        mw_ambient_apikey: readStore('mw_ambient_apikey', ''),
+                        mw_ambient_device: readStore('mw_ambient_device', '')
+                    },
+                    lastCity: null,
+                    ambientForecastCity: null
+                };
+                try {
+                    var rawCity = readStore('mw_last_city', null);
+                    if (rawCity) payload.lastCity = JSON.parse(rawCity);
+                } catch (e) {}
+                return payload;
+            }
+
+            async function pushNow() {
+                var u = requireUser();
+                if (!u) return;
+                try {
+                    msg('Syncing...', false);
+                    var payload = snapshotLocal();
+                    // Store ambient forecast city separately (may differ from lastCity)
+                    try {
+                        var af = readStore('mw_ambient_forecast_city', null);
+                        if (af) payload.ambientForecastCity = JSON.parse(af);
+                    } catch (e0) {}
+                    await db.collection('monoweather_users').doc(u.uid).set(payload, { merge: true });
+                    msg('Synced.', false);
+                } catch (e) {
+                    console.error(e);
+                    msg(friendlyErr(e), true);
+                }
+            }
+
+            async function restoreFromCloud(isAuto) {
+                var u = requireUser();
+                if (!u) return;
+                try {
+                    // Prevent auto-push while we apply cloud values
+                    try { window.cloudSync._suspendPush = true; } catch (e0) {}
+
+                    msg('Restoring settings...', false);
+                    var doc = await db.collection('monoweather_users').doc(u.uid).get();
+                    if (!doc.exists) {
+                        // First-time account: seed cloud from local so other devices can sync
+                        try {
+                            var seed = snapshotLocal();
+                            await db.collection('monoweather_users').doc(u.uid).set(seed, { merge: true });
+                            msg('Account ready.', false);
+                        } catch (eSeed) {
+                            msg(friendlyErr(eSeed), true);
+                        }
+                        return;
+                    }
+                    var data = doc.data() || {};
+                    var s = data.settings || {};
+
+                    // Apply settings locally
+                    if (s.mw_unit) persistStore('mw_unit', s.mw_unit);
+                    if (s.mw_wind_unit) persistStore('mw_wind_unit', s.mw_wind_unit);
+                    if (s.mw_time) persistStore('mw_time', s.mw_time);
+                    if (s.mw_theme) persistStore('mw_theme', s.mw_theme);
+                    if (s.mw_accent) persistStore('mw_accent', s.mw_accent);
+
+                    // Apply city
+                    if (data.lastCity) {
+                        try { persistStore('mw_last_city', JSON.stringify(data.lastCity)); } catch (e) {}
+                    }
+
+                    // Provider + Ambient
+                    if (s.mw_provider) persistStore('mw_provider', s.mw_provider);
+                    if (s.mw_ambient_appkey !== undefined) persistStore('mw_ambient_appkey', s.mw_ambient_appkey);
+                    if (s.mw_ambient_apikey !== undefined) persistStore('mw_ambient_apikey', s.mw_ambient_apikey);
+                    if (s.mw_ambient_device !== undefined) persistStore('mw_ambient_device', s.mw_ambient_device);
+                    if (data.ambientForecastCity) {
+                        try { persistStore('mw_ambient_forecast_city', JSON.stringify(data.ambientForecastCity)); } catch (e) {}
+                    }
+
+                    // Reload state from stores
+                    state.unit = readStore('mw_unit', state.unit);
+                    state.windSpeedUnit = readStore('mw_wind_unit', state.windSpeedUnit);
+                    state.timeFormat = readStore('mw_time', state.timeFormat);
+                    state.theme = readStore('mw_theme', state.theme);
+                    state.accent = readStore('mw_accent', state.accent);
+                    state.provider = readStore('mw_provider', state.provider);
+                    state.ambient.appKey = readStore('mw_ambient_appkey', state.ambient.appKey);
+                    state.ambient.apiKey = readStore('mw_ambient_apikey', state.ambient.apiKey);
+                    state.ambient.deviceMac = readStore('mw_ambient_device', state.ambient.deviceMac);
+                    try {
+                        var af = readStore('mw_ambient_forecast_city', null);
+                        state.ambient.forecastCity = af ? JSON.parse(af) : null;
+                    } catch (e2) {
+                        state.ambient.forecastCity = null;
+                    }
+
+                    applySettings();
+
+                    // Reload weather if we have a city
+                    try {
+                        if (data.lastCity && data.lastCity.latitude !== undefined) {
+                            els.search.value = data.lastCity.name || '';
+                            await handleSearchWithCoords(data.lastCity);
+                        }
+                    } catch (e) {}
+
+                    msg('Synced.', false);
+                } catch (e) {
+                    console.error(e);
+                    msg(friendlyErr(e), true);
+                } finally {
+                    try { window.cloudSync._suspendPush = false; } catch (e1) {}
+                }
+            }
+
+            async function signup(email, password) {
+                if (!isReady()) { msg('Cloud sync not configured.', true); return; }
+                try {
+                    msg('Creating account...', false);
+                    await auth.createUserWithEmailAndPassword(email, password);
+                    msg('Account created.', false);
+                } catch (e) {
+                    console.error(e);
+                    msg(friendlyErr(e), true);
+                }
+            }
+
+            async function login(email, password) {
+                if (!isReady()) { msg('Cloud sync not configured.', true); return; }
+                try {
+                    msg('Signing in...', false);
+                    await auth.signInWithEmailAndPassword(email, password);
+                    msg('Signed in.', false);
+                } catch (e) {
+                    console.error(e);
+                    msg(friendlyErr(e), true);
+                }
+            }
+
+            async function logout() {
+                if (!isReady()) { msg('Cloud sync not configured.', true); return; }
+                try {
+                    await auth.signOut();
+                    msg('Signed out.', false);
+                } catch (e) {
+                    console.error(e);
+                    msg(friendlyErr(e), true);
+                }
+            }
+
+            function _schedulePush() {
+                // Debounced auto-push if signed in.
+                try {
+                    if (!isReady() || !auth.currentUser) return;
+                    if (pushTimer) clearTimeout(pushTimer);
+                    pushTimer = setTimeout(function(){
+                        pushTimer = null;
+                        pushNow();
+                    }, 1200);
+                } catch (e) {}
+            }
+
+            return {
+                initFirebase: initFirebase,
+                pushNow: pushNow,
+                restoreFromCloud: restoreFromCloud,
+                signup: signup,
+                login: login,
+                logout: logout,
+                _schedulePush: _schedulePush
+            };
+        })();
+
         // --- Init ---
         function init() {
             // Map elements
@@ -1196,6 +1695,7 @@
             els.moon = document.getElementById('moon-phase-display');
             els.moonDesc = document.getElementById('moon-desc');
             els.moonIcon = document.getElementById('moon-icon');
+            els.providerBadge = document.getElementById('provider-badge');
             
             els.wind = document.getElementById('wind-display');
             els.windDesc = document.getElementById('wind-desc');
@@ -1257,6 +1757,31 @@
             els.windMph = document.getElementById('wind-mph');
             els.colorPicker = document.getElementById('color-picker');
 
+            // Ambient Weather
+            els.providerBadge = document.getElementById('provider-badge');
+            els.providerHint = document.getElementById('provider-hint');
+            els.providerStatus = document.getElementById('provider-status');
+            els.providerOpenMeteo = document.getElementById('provider-openmeteo');
+            els.providerAmbient = document.getElementById('provider-ambient');
+            els.ambientSettings = document.getElementById('ambient-settings');
+            els.ambientAppKey = document.getElementById('ambient-app-key');
+            els.ambientApiKey = document.getElementById('ambient-api-key');
+            els.ambientDevice = document.getElementById('ambient-device');
+            els.ambientRefresh = document.getElementById('ambient-refresh');
+            els.ambientCitySearch = document.getElementById('ambient-city-search');
+            els.ambientCityDropdown = document.getElementById('ambient-city-dropdown');
+            els.ambientMsg = document.getElementById('ambient-msg');
+
+            // Account Sync (optional)
+            els.accountStatus = document.getElementById('account-status');
+            els.accountEmail = document.getElementById('account-email');
+            els.accountPassword = document.getElementById('account-password');
+            els.accountSignup = document.getElementById('account-signup');
+            els.accountLogin = document.getElementById('account-login');
+            els.accountLogout = document.getElementById('account-logout');
+            // Sync/Restore buttons removed: sync happens automatically
+            els.accountMsg = document.getElementById('account-msg');
+
             // Modal
             els.modal = document.getElementById('detail-modal');
             els.modalTitle = document.getElementById('modal-title');
@@ -1267,10 +1792,12 @@
 
             window.els = els; // Ensure global access for onclick handlers
 
-            setupSlider();
-            applySettings();
-            setupEvents();
-            setPage(0);
+            try { setupSlider(); } catch (eSlider) { console.error('setupSlider failed', eSlider); }
+            try { applySettings(); } catch (eApply) { console.error('applySettings failed', eApply); }
+            try { setupEvents(); } catch (eEvents) { console.error('setupEvents failed', eEvents); }
+            // Ambient UI is optional; don't let errors here break the rest of init (including Account Sync).
+            try { setupAmbientUI(); } catch (eAmbient) { console.error('setupAmbientUI failed', eAmbient); }
+            try { setPage(0); } catch (ePage) { console.error('setPage failed', ePage); }
             
             // Modal Backdrop Click
             els.modal.addEventListener('click', function(event) {
@@ -1281,6 +1808,51 @@
                     els.modal.close();
                 }
             });
+
+            // Hard-coded Firebase config: auto-init if it appears filled.
+            // Note: Firebase SDK scripts are loaded in <head> with `defer`, so we may need to wait a moment.
+            try {
+                var cfgOk = window.MONO_FIREBASE_CONFIG && window.MONO_FIREBASE_CONFIG.apiKey && window.MONO_FIREBASE_CONFIG.projectId;
+                if (cfgOk && window.cloudSync && typeof window.cloudSync.initFirebase === 'function') {
+                    try { if (els.accountStatus) els.accountStatus.innerText = 'LOADING'; } catch (e0) {}
+
+                    // Firebase scripts are `defer` and may take longer than a few seconds on slow networks.
+                    // The old 4s timeout could incorrectly mark the UI OFFLINE even though Firebase loads shortly after.
+                    (function waitForFirebase(attempt){
+                        attempt = attempt || 0;
+                        if (window.firebase && window.firebase.initializeApp) {
+                            window.cloudSync.initFirebase();
+                            return;
+                        }
+                        if (attempt > 600) {
+                            // ~30s max wait
+                            try { if (els.accountStatus) els.accountStatus.innerText = 'OFFLINE'; } catch (e1) {}
+                            return;
+                        }
+                        setTimeout(function(){ waitForFirebase(attempt + 1); }, 50);
+                    })();
+
+                    // Also retry once at full window load (in case Firebase loads after our timeout due to caching/network)
+                    window.addEventListener('load', function(){
+                        try {
+                            if (window.firebase && window.firebase.initializeApp) {
+                                window.cloudSync.initFirebase();
+                            }
+                        } catch (eL) {}
+                    }, { once: true });
+                } else {
+                    // No config present
+                    try { if (els.accountStatus) els.accountStatus.innerText = 'OFFLINE'; } catch (e2) {}
+                }
+            } catch (e) {}
+
+            // Restore Ambient forecast city (optional)
+            try {
+                var af = readStore('mw_ambient_forecast_city', null);
+                state.ambient.forecastCity = af ? JSON.parse(af) : null;
+            } catch (e) {
+                state.ambient.forecastCity = null;
+            }
 
             // Restore last city (from cookie/localStorage)
             try {
@@ -2700,6 +3272,39 @@
                     els.dropdown.classList.add('hidden');
                 }
             };
+
+            // --- Account Sync (optional) ---
+            function getAuthInput() {
+                var email = (els.accountEmail && els.accountEmail.value) ? els.accountEmail.value.trim() : '';
+                var pass = (els.accountPassword && els.accountPassword.value) ? els.accountPassword.value : '';
+                return { email: email, pass: pass };
+            }
+
+            // Hard-coded Firebase config: no APPLY_CONFIG button needed.
+
+            if (els.accountSignup) {
+                els.accountSignup.onclick = () => {
+                    var v = getAuthInput();
+                    if (!v.email || !v.pass) { if (els.accountMsg) els.accountMsg.innerText = 'Please enter email and password.'; return; }
+                    window.cloudSync.signup(v.email, v.pass);
+                };
+            }
+
+            if (els.accountLogin) {
+                els.accountLogin.onclick = () => {
+                    var v = getAuthInput();
+                    if (!v.email || !v.pass) { if (els.accountMsg) els.accountMsg.innerText = 'Please enter email and password.'; return; }
+                    window.cloudSync.login(v.email, v.pass);
+                };
+            }
+
+            if (els.accountLogout) {
+                els.accountLogout.onclick = () => {
+                    window.cloudSync.logout();
+                };
+            }
+
+
         }
 
         // --- Data Logic ---
