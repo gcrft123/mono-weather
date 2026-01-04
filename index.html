@@ -1741,6 +1741,13 @@
                             } else {
                                 setStatus('READY', true);
                                 msg('', false);
+                                // Revert to Open-Meteo if Ambient was active on sign-out
+                                if (state.provider === 'ambient') {
+                                    state.provider = 'openmeteo';
+                                    persistStore('mw_provider', 'openmeteo');
+                                    applySettings();
+                                    if (state.cityData) handleSearchWithCoords(state.cityData);
+                                }
                             }
                         });
                         inited = true;
@@ -3498,6 +3505,19 @@
             // Accent
             document.documentElement.style.setProperty('--accent-color', state.accent);
 
+            // Provider
+            if (state.provider === 'ambient') {
+                updateBtnState(els.providerAmbient, els.providerOpenMeteo);
+                if (els.ambientSettings) els.ambientSettings.classList.remove('hidden');
+                if (els.providerStatus) els.providerStatus.innerText = 'AMBIENT WEATHER';
+                if (els.providerHint) els.providerHint.innerText = 'LIVE STATION DATA • FORECAST FROM OPEN-METEO';
+            } else {
+                updateBtnState(els.providerOpenMeteo, els.providerAmbient);
+                if (els.ambientSettings) els.ambientSettings.classList.add('hidden');
+                if (els.providerStatus) els.providerStatus.innerText = 'OPEN METEO';
+                if (els.providerHint) els.providerHint.innerText = 'OPEN-METEO DEFAULT • AMBIENT REQUIRES SIGN IN';
+            }
+
             // Re-render
             if (state.weatherData) renderWeather();
 
@@ -3727,25 +3747,11 @@
         }
 
         function setupAmbientUI() {
-            function updateProviderUI() {
-                if (state.provider === 'ambient') {
-                    updateBtnState(els.providerAmbient, els.providerOpenMeteo);
-                    if (els.ambientSettings) els.ambientSettings.classList.remove('hidden');
-                    if (els.providerStatus) els.providerStatus.innerText = 'AMBIENT WEATHER';
-                    if (els.providerHint) els.providerHint.innerText = 'LIVE STATION DATA • FORECAST FROM OPEN-METEO';
-                } else {
-                    updateBtnState(els.providerOpenMeteo, els.providerAmbient);
-                    if (els.ambientSettings) els.ambientSettings.classList.add('hidden');
-                    if (els.providerStatus) els.providerStatus.innerText = 'OPEN METEO';
-                    if (els.providerHint) els.providerHint.innerText = 'OPEN-METEO DEFAULT • AMBIENT REQUIRES SIGN IN';
-                }
-            }
-
             if (els.providerOpenMeteo) {
                 els.providerOpenMeteo.onclick = function () {
                     state.provider = 'openmeteo';
                     persistStore('mw_provider', 'openmeteo');
-                    updateProviderUI();
+                    applySettings();
                     // Reload data with new provider
                     if (state.cityData) handleSearchWithCoords(state.cityData);
                 };
@@ -3757,20 +3763,19 @@
                     var user = (window.firebase && window.firebase.auth && window.firebase.auth().currentUser);
                     if (!user) {
                         if (els.providerStatus) els.providerStatus.innerText = 'SIGN IN REQUIRED';
-                        if (els.providerHint) els.providerHint.innerText = 'Please sign in to use Ambient Weather integratio';
+                        if (els.providerHint) els.providerHint.innerText = 'Please sign in to use Ambient Weather integration';
                         // Shake/Animate to indicate error? (Optional)
                         return;
                     }
 
                     state.provider = 'ambient';
                     persistStore('mw_provider', 'ambient');
-                    updateProviderUI();
+                    applySettings();
+
                     // Reload data with new provider
                     if (state.cityData) handleSearchWithCoords(state.cityData);
                 };
             }
-
-            updateProviderUI();
 
             if (els.ambientApiKey) {
                 els.ambientApiKey.value = state.ambient.apiKey || '';
@@ -3919,17 +3924,10 @@
 
             // AUTO-FETCH DEVICES ON LOAD
             if (state.ambient.apiKey && els.ambientRefresh) {
-                // Trigger the refresh button click logic programmatically but without UI feedback if desirable,
-                // or just call the fetch logic. Let's reuse the click handler logic but silently if possible,
-                // or just trigger the click to keep it simple and give user feedback that it's loading.
-                // Actually, user wants it to just Work.
-
-                // We will manually call the fetch logic to avoid "clicking" which might be distracting
                 (async function () {
                     try {
                         var devices = await fetchAmbientDevices(AMBIENT_APP_KEY, state.ambient.apiKey);
                         populateDeviceDropdown(devices);
-                        // Ensure correct device is selected from state persistence
                         if (state.ambient.deviceMac && els.ambientDevice) {
                             els.ambientDevice.value = state.ambient.deviceMac;
                         }
