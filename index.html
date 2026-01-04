@@ -1741,12 +1741,21 @@
                             } else {
                                 setStatus('READY', true);
                                 msg('', false);
+                                // Reset Ambient State to prevent cross-account leaks
+                                _ambientFetchPromise = null;
+                                state.ambient.lastData = null;
+                                state.ambient.history = [];
+                                state.ambient.apiKey = '';
+                                state.ambient.deviceMac = '';
+
                                 // Revert to Open-Meteo if Ambient was active on sign-out
                                 if (state.provider === 'ambient') {
                                     state.provider = 'openmeteo';
                                     persistStore('mw_provider', 'openmeteo');
                                     applySettings();
                                     if (state.cityData) handleSearchWithCoords(state.cityData);
+                                } else {
+                                    applySettings(); // Refresh UI to hide ambient settings if needed
                                 }
                             }
                         });
@@ -3670,11 +3679,14 @@
                     }
                     if (!res.ok) {
                         var err = await res.json().catch(() => ({}));
-                        throw new Error(err.error || 'AMBIENT_API_ERROR');
+                        var msg = err.error || err.message || 'Error ' + res.status;
+                        if (res.status === 401) msg = 'Invalid API/App Key';
+                        if (res.status === 429) msg = 'Rate Limited - Try again in a moment';
+                        throw new Error(msg);
                     }
                     return res.json();
                 } catch (e) {
-                    if (attempt > 0) {
+                    if (attempt > 0 && (e.message.includes('Rate Limited') || e.message === 'Failed to fetch' || e.name === 'TypeError')) {
                         await new Promise(r => setTimeout(r, 1000));
                         return fetchWithRetry(attempt - 1);
                     }
@@ -3779,7 +3791,7 @@
 
             if (els.ambientApiKey) {
                 els.ambientApiKey.value = state.ambient.apiKey || '';
-                els.ambientApiKey.onchange = function () {
+                els.ambientApiKey.oninput = function () {
                     state.ambient.apiKey = els.ambientApiKey.value.trim();
                     persistStore('mw_ambient_apikey', state.ambient.apiKey);
                 };
@@ -7396,7 +7408,29 @@
                 `;
             } else {
                 // Default behavior
-                els.modalValue.innerText = value;
+                var valStr = value;
+
+                // AMBIENT OVERRIDE for other metrics
+                if (state.provider === 'ambient' && state.ambient.lastData) {
+                    var ad = state.ambient.lastData;
+                    if (title === 'WIND') {
+                        var ws = ad.windspeedmph;
+                        var wu = state.windSpeedUnit === 'mph' ? 'MPH' : 'KM/H';
+                        if (state.windSpeedUnit === 'kmh') ws *= 1.60934;
+                        valStr = Math.round(ws) + ' ' + wu;
+                    } else if (title === 'HUMIDITY') {
+                        valStr = ad.humidity + '%';
+                    } else if (title === 'UV INDEX') {
+                        valStr = String(ad.uv);
+                    } else if (title === 'PRESSURE') {
+                        var pVal = ad.baromrelin; // InHg
+                        var pUnit = state.pressureUnit || 'hPa';
+                        if (pUnit === 'hPa') pVal *= 33.8639;
+                        valStr = pVal.toFixed(pUnit === 'hPa' ? 1 : 2) + ' ' + pUnit.toUpperCase();
+                    }
+                }
+
+                els.modalValue.innerText = valStr;
             }
 
             els.modal.showModal();
