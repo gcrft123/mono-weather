@@ -1461,7 +1461,7 @@
                 appKey: readStore('mw_ambient_appkey', ''),
                 apiKey: readStore('mw_ambient_apikey', ''),
                 deviceMac: readStore('mw_ambient_device', ''),
-                proxyUrl: readStore('mw_ambient_proxy_url', 'http://192.168.1.196:3001'),
+                proxyUrl: readStore('mw_ambient_proxy_url', 'https://corsproxy.io/?'),
                 // City to use for Open-Meteo forecast/radar target when Ambient is active
                 forecastCity: (function () {
                     try {
@@ -1806,7 +1806,7 @@
                         mw_ambient_appkey: readStore('mw_ambient_appkey', ''),
                         mw_ambient_apikey: readStore('mw_ambient_apikey', ''),
                         mw_ambient_device: readStore('mw_ambient_device', ''),
-                        mw_ambient_proxy_url: readStore('mw_ambient_proxy_url', 'http://192.168.1.196:3001')
+                        mw_ambient_proxy_url: readStore('mw_ambient_proxy_url', 'https://corsproxy.io/?')
                     },
                     lastCity: null,
                     ambientForecastCity: null
@@ -3676,8 +3676,11 @@
             // Deduplicate in-flight requests (extend window to 2s to be safe)
             if (_ambientFetchPromise) return _ambientFetchPromise;
 
-            var proxy = state.ambient.proxyUrl || 'http://192.168.1.196:3001';
-            var url = `${proxy}/api/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
+            var proxy = state.ambient.proxyUrl || 'https://corsproxy.io/?';
+            var ambientUrl = `https://rt.ambientweather.net/v1/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
+
+            // Logic: if proxy ends in '?', treat as wrapper. Else treat as endpoint provider.
+            var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxy}/api/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
 
             var fetchWithRetry = async (attempt) => {
                 try {
@@ -3716,9 +3719,11 @@
         async function fetchAmbientHistory(appKey, apiKey, macAddress) {
             if (!macAddress) return [];
             try {
-                var proxy = state.ambient.proxyUrl || 'http://192.168.1.196:3001';
-                // We use the same proxy endpoint but with limit=288
-                var url = `${proxy}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
+                var proxy = state.ambient.proxyUrl || 'https://corsproxy.io/?';
+                var ambientUrl = `https://rt.ambientweather.net/v1/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
+
+                var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxy}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
+
                 var res = await fetch(url);
                 if (!res.ok) throw new Error('History fetch failed');
                 var data = await res.json();
@@ -3809,7 +3814,7 @@
             }
 
             if (els.ambientProxyUrl) {
-                els.ambientProxyUrl.value = state.ambient.proxyUrl || 'http://192.168.1.196:3001';
+                els.ambientProxyUrl.value = state.ambient.proxyUrl || 'https://corsproxy.io/?';
                 els.ambientProxyUrl.oninput = function () {
                     state.ambient.proxyUrl = els.ambientProxyUrl.value.trim().toLowerCase();
                     persistStore('mw_ambient_proxy_url', state.ambient.proxyUrl);
