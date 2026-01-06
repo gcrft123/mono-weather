@@ -785,13 +785,13 @@
 
                             <!-- Moon Phase -->
                             <div class="weather-card interactive p-6 flex flex-col justify-between h-48"
-                                onclick="showDetail('MOON PHASE', els.moon.innerText, 'Daily moon phase (0=new, 0.5=full).', (window.currentMoonIcon || 'wi wi-moon-full'))">
+                                onclick="showDetail('MOON PHASE', els.moon.innerText, 'Daily moon phase (0=new, 0.5=full).', (window.currentMoonIcon || 'wi wi-moon-alt-full'))">
                                 <div class="flex justify-between items-start">
                                     <div class="flex flex-col">
                                         <span class="text-sm font-bold opacity-50">MOON</span>
                                         <span id="moon-desc" class="text-xs font-bold text-accent mt-1">--</span>
                                     </div>
-                                    <i id="moon-icon" class="wi wi-moon-full text-4xl text-accent"></i>
+                                    <i id="moon-icon" class="wi wi-moon-alt-full text-4xl text-accent"></i>
                                 </div>
                                 <div>
                                     <div class="text-xs font-bold opacity-50">PHASE</div>
@@ -4374,25 +4374,23 @@
                 if (els.moonDesc) {
                     els.moonDesc.innerText = `${pct}% LIT`;
                 }
-                // Map to Erik Flowers Weather Icons for moon phases
-                var moonIconClass = 'wi wi-moon-alt-full';
-                if (pct <= 3 || pct >= 97) {
-                    moonIconClass = 'wi wi-moon-alt-new';
-                } else if (mpName === 'WAXING CRESCENT') {
-                    moonIconClass = 'wi wi-moon-alt-waxing-crescent-4';
-                } else if (mpName === 'FIRST QUARTER') {
-                    moonIconClass = 'wi wi-moon-alt-first-quarter';
-                } else if (mpName === 'WAXING GIBBOUS') {
-                    moonIconClass = 'wi wi-moon-alt-waxing-gibbous-4';
-                } else if (mpName === 'FULL MOON') {
-                    moonIconClass = 'wi wi-moon-alt-full';
-                } else if (mpName === 'WANING GIBBOUS') {
-                    moonIconClass = 'wi wi-moon-alt-waning-gibbous-4';
-                } else if (mpName === 'LAST QUARTER') {
-                    moonIconClass = 'wi wi-moon-alt-third-quarter';
-                } else if (mpName === 'WANING CRESCENT') {
-                    moonIconClass = 'wi wi-moon-alt-waning-crescent-4';
-                }
+                // Map to Erik Flowers Weather Icons (alt set) using 28-slice precision
+                // IMPORTANT: In the 'alt' set, pixels represent SHADOW. 
+                // In a dark theme, we want pixels to represent LIGHT.
+                // We achieve this by shifting the selection by 14 slices (0.5 lunation).
+                var moonIconClass = 'wi wi-moon-alt-new';
+                var frac = mpObj.fraction; // 0..1 (0=New, 0.5=Full)
+                var iconIndex = Math.floor(((frac + 0.5) % 1) * 28);
+
+                if (iconIndex === 0) moonIconClass = 'wi wi-moon-alt-new';
+                else if (iconIndex >= 1 && iconIndex <= 6) moonIconClass = 'wi wi-moon-alt-waxing-crescent-' + iconIndex;
+                else if (iconIndex === 7) moonIconClass = 'wi wi-moon-alt-first-quarter';
+                else if (iconIndex >= 8 && iconIndex <= 13) moonIconClass = 'wi wi-moon-alt-waxing-gibbous-' + (iconIndex - 7);
+                else if (iconIndex === 14) moonIconClass = 'wi wi-moon-alt-full';
+                else if (iconIndex >= 15 && iconIndex <= 20) moonIconClass = 'wi wi-moon-alt-waning-gibbous-' + (iconIndex - 14);
+                else if (iconIndex === 21) moonIconClass = 'wi wi-moon-alt-third-quarter';
+                else if (iconIndex >= 22 && iconIndex <= 27) moonIconClass = 'wi wi-moon-alt-waning-crescent-' + (iconIndex - 21);
+                else moonIconClass = 'wi wi-moon-alt-new';
                 window.currentMoonIcon = moonIconClass;
                 if (els && els.moonIcon) {
                     els.moonIcon.className = `${moonIconClass} text-4xl text-accent`;
