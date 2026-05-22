@@ -809,7 +809,7 @@
                         </div>
 
                         <footer class="text-center py-8 opacity-40 text-xs font-mono">
-                            DATA: OPEN-METEO API • MONOWEATHER v1.0
+                            DATA: OPEN-METEO API • MONOWEATHER v1.0.1
                         </footer>
 
                     </div>
@@ -1185,7 +1185,7 @@
                                 </div>
                                 <div>
                                     <div class="text-xs font-bold opacity-60 mb-2 tracking-widest">PROXY URL</div>
-                                    <input id="ambient-proxy-url" type="text" placeholder="http://[IP]:3001"
+                                    <input id="ambient-proxy-url" type="text" placeholder="/"
                                         class="w-full bg-transparent border-4 border-[var(--text-color)] px-4 py-3 font-bold outline-none uppercase placeholder:lowercase">
                                 </div>
                             </div>
@@ -1440,6 +1440,17 @@
             } catch (e) { }
         }
 
+        // One-time migration: prior versions defaulted to corsproxy.io (local-dev only).
+        // Reset stored value to "/" so the same-origin Netlify function is used instead.
+        (function migrateAmbientProxyUrl() {
+            try {
+                var stored = readStore('mw_ambient_proxy_url', null);
+                if (stored === 'https://corsproxy.io/?') {
+                    persistStore('mw_ambient_proxy_url', '/');
+                }
+            } catch (e) { }
+        })();
+
         // --- Globals ---
         var initialUnit = readStore('mw_unit', 'c');
         var initialWindUnit = readStore('mw_wind_unit', (initialUnit === 'f' ? 'mph' : 'kmh'));
@@ -1461,7 +1472,7 @@
                 appKey: readStore('mw_ambient_appkey', ''),
                 apiKey: readStore('mw_ambient_apikey', ''),
                 deviceMac: readStore('mw_ambient_device', ''),
-                proxyUrl: readStore('mw_ambient_proxy_url', 'https://corsproxy.io/?'),
+                proxyUrl: readStore('mw_ambient_proxy_url', '/'),
                 // City to use for Open-Meteo forecast/radar target when Ambient is active
                 forecastCity: (function () {
                     try {
@@ -1806,7 +1817,7 @@
                         mw_ambient_appkey: readStore('mw_ambient_appkey', ''),
                         mw_ambient_apikey: readStore('mw_ambient_apikey', ''),
                         mw_ambient_device: readStore('mw_ambient_device', ''),
-                        mw_ambient_proxy_url: readStore('mw_ambient_proxy_url', 'https://corsproxy.io/?')
+                        mw_ambient_proxy_url: readStore('mw_ambient_proxy_url', '/')
                     },
                     lastCity: null,
                     ambientForecastCity: null
@@ -3676,7 +3687,7 @@
             // Deduplicate in-flight requests (extend window to 2s to be safe)
             if (_ambientFetchPromise) return _ambientFetchPromise;
 
-            var proxy = state.ambient.proxyUrl || 'https://corsproxy.io/?';
+            var proxy = state.ambient.proxyUrl || '/';
             var ambientUrl = `https://rt.ambientweather.net/v1/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
 
             // Logic: if proxy ends in '?', treat as wrapper. Else treat as endpoint provider.
@@ -3719,7 +3730,7 @@
         async function fetchAmbientHistory(appKey, apiKey, macAddress) {
             if (!macAddress) return [];
             try {
-                var proxy = state.ambient.proxyUrl || 'https://corsproxy.io/?';
+                var proxy = state.ambient.proxyUrl || '/';
                 var ambientUrl = `https://rt.ambientweather.net/v1/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
 
                 var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxy}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
@@ -3814,7 +3825,7 @@
             }
 
             if (els.ambientProxyUrl) {
-                els.ambientProxyUrl.value = state.ambient.proxyUrl || 'https://corsproxy.io/?';
+                els.ambientProxyUrl.value = state.ambient.proxyUrl || '/';
                 els.ambientProxyUrl.oninput = function () {
                     state.ambient.proxyUrl = els.ambientProxyUrl.value.trim().toLowerCase();
                     persistStore('mw_ambient_proxy_url', state.ambient.proxyUrl);
