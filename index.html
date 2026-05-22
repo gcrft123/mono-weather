@@ -3691,7 +3691,10 @@
             var ambientUrl = `https://rt.ambientweather.net/v1/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
 
             // Logic: if proxy ends in '?', treat as wrapper. Else treat as endpoint provider.
-            var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxy}/api/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
+            // Strip trailing slashes from the endpoint form so '/' resolves to a same-origin
+            // '/api/devices' instead of a protocol-relative '//api/devices'.
+            var proxyBase = proxy.replace(/\/+$/, '');
+            var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxyBase}/api/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
 
             var fetchWithRetry = async (attempt) => {
                 try {
@@ -3733,7 +3736,8 @@
                 var proxy = state.ambient.proxyUrl || '/';
                 var ambientUrl = `https://rt.ambientweather.net/v1/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
 
-                var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxy}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
+                var proxyBase = proxy.replace(/\/+$/, '');
+                var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxyBase}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
 
                 var res = await fetch(url);
                 if (!res.ok) throw new Error('History fetch failed');
@@ -6561,6 +6565,29 @@
                 }
                 if (pMm === null || pMm === undefined || isNaN(pMm)) pMm = 0;
 
+                // AMBIENT HISTORY MERGE — replace Open-Meteo prediction with station's
+                // measured hourlyrainin (inches → mm) when a sample exists within 20 min.
+                if (state.provider === 'ambient' && state.ambient.history && state.ambient.history.length > 0) {
+                    var pTime = new Date(hourly.time[i]).getTime();
+                    var now = Date.now();
+                    if (pTime <= now) {
+                        var closest = null;
+                        var minDiff = 20 * 60 * 1000;
+                        for (var h = 0; h < state.ambient.history.length; h++) {
+                            var item = state.ambient.history[h];
+                            var hTime = new Date(item.date).getTime();
+                            var diff = Math.abs(hTime - pTime);
+                            if (diff < minDiff) {
+                                minDiff = diff;
+                                closest = item;
+                            }
+                        }
+                        if (closest && closest.hourlyrainin !== undefined && closest.hourlyrainin !== null) {
+                            pMm = closest.hourlyrainin * 25.4;
+                        }
+                    }
+                }
+
                 var v = pMm;
                 if (state.unit === 'f') v = pMm * 0.0393701; // inches
 
@@ -6569,6 +6596,25 @@
                 var t = hourly.time[i];
                 times.push(t);
                 labels.push(formatChartHour(t));
+            }
+
+            // AMBIENT OVERRIDE (current point) — match the homepage Precipitation tile.
+            if (state.provider === 'ambient' && state.ambient.lastData) {
+                var currentHIdx = getHourlyIndex();
+                var localIdx = -1;
+                for (var k = 0; k < dayIndices.length; k++) {
+                    if (dayIndices[k] === currentHIdx) {
+                        localIdx = k;
+                        break;
+                    }
+                }
+                if (localIdx !== -1) {
+                    var ad = state.ambient.lastData;
+                    if (ad.hourlyrainin !== undefined && ad.hourlyrainin !== null) {
+                        var pMmNow = ad.hourlyrainin * 25.4;
+                        points[localIdx] = (state.unit === 'f') ? pMmNow * 0.0393701 : pMmNow;
+                    }
+                }
             }
 
             // Current time marker index
@@ -6912,7 +6958,12 @@
                         }
                         if (closest && closest.tempf !== undefined) {
                             tC = (closest.tempf - 32) * 5 / 9;
-                            fC = (closest.feelsLike - 32) * 5 / 9;
+                            // Not all stations report feelsLike — fall back to actual temp.
+                            if (closest.feelsLike !== undefined && closest.feelsLike !== null) {
+                                fC = (closest.feelsLike - 32) * 5 / 9;
+                            } else {
+                                fC = tC;
+                            }
                         }
                     }
                 }
@@ -6957,13 +7008,14 @@
 
                 if (localIdx !== -1) {
                     var ad = state.ambient.lastData;
-                    // Ambient is F
+                    // Ambient is F; fall back to tempf when feelsLike is missing.
+                    var feelsF = (ad.feelsLike !== undefined && ad.feelsLike !== null) ? ad.feelsLike : ad.tempf;
                     if (state.unit === 'c') {
                         realPts[localIdx] = (ad.tempf - 32) * 5 / 9;
-                        feelPts[localIdx] = (ad.feelsLike - 32) * 5 / 9;
+                        feelPts[localIdx] = (feelsF - 32) * 5 / 9;
                     } else {
                         realPts[localIdx] = ad.tempf;
-                        feelPts[localIdx] = ad.feelsLike;
+                        feelPts[localIdx] = feelsF;
                     }
                 }
             }
