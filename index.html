@@ -3682,19 +3682,52 @@
         // Hardcoded Application Key (per-app, not per-user)
         var AMBIENT_APP_KEY = '655dd52d7a884730a900b799960374b7922a9c5a719d499fbe6a7e9950be0bbb';
 
+        // CORS proxy fallback for environments without a same-origin proxy
+        // (e.g. file:// or plain static servers without Netlify Functions / Express proxy).
+        var CORS_PROXY_FALLBACK = 'https://corsproxy.io/?';
+
+        /**
+         * Build the final fetch URL for an Ambient Weather API path.
+         *
+         * Rules:
+         *   1. If proxyUrl ends in '?', treat it as a CORS wrapper prefix.
+         *   2. If proxyUrl is '/' (same-origin) AND the page is on file:// or
+         *      another protocol that cannot reach /api/devices, fall back to
+         *      the CORS proxy.
+         *   3. Otherwise, treat proxyUrl as a same-origin (or absolute) base
+         *      that exposes /api/devices[/:mac] endpoints.
+         */
+        function buildAmbientProxyUrl(ambientUrl, proxy) {
+            proxy = proxy || state.ambient.proxyUrl || '/';
+
+            // Wrapper-style proxy (e.g. 'https://corsproxy.io/?')
+            if (proxy.endsWith('?')) return `${proxy}${ambientUrl}`;
+
+            // Same-origin proxy — check if we're in an environment where it works.
+            var isSameOriginProxy = (proxy === '/' || proxy === '');
+            var needsFallback = isSameOriginProxy && (
+                window.location.protocol === 'file:' ||
+                // Also catch odd protocols (blob:, data:, etc.)
+                !window.location.protocol.startsWith('http')
+            );
+
+            if (needsFallback) {
+                return `${CORS_PROXY_FALLBACK}${ambientUrl}`;
+            }
+
+            var proxyBase = proxy.replace(/\/+$/, '');
+            // Re-derive the path from the full ambient URL
+            var u = new URL(ambientUrl);
+            return `${proxyBase}${u.pathname}?${u.searchParams.toString()}`;
+        }
+
         var _ambientFetchPromise = null;
         async function fetchAmbientDevices(appKey, apiKey, retries = 3) {
             // Deduplicate in-flight requests (extend window to 2s to be safe)
             if (_ambientFetchPromise) return _ambientFetchPromise;
 
-            var proxy = state.ambient.proxyUrl || '/';
             var ambientUrl = `https://rt.ambientweather.net/v1/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
-
-            // Logic: if proxy ends in '?', treat as wrapper. Else treat as endpoint provider.
-            // Strip trailing slashes from the endpoint form so '/' resolves to a same-origin
-            // '/api/devices' instead of a protocol-relative '//api/devices'.
-            var proxyBase = proxy.replace(/\/+$/, '');
-            var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxyBase}/api/devices?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}`;
+            var url = buildAmbientProxyUrl(ambientUrl);
 
             var fetchWithRetry = async (attempt) => {
                 try {
@@ -3713,7 +3746,7 @@
                     }
                     return res.json();
                 } catch (e) {
-                    if (attempt > 0 && (e.message.includes('Rate Limited') || e.message === 'Failed to fetch' || e.name === 'TypeError')) {
+                    if (attempt > 0 && (e.message.includes('Rate Limited') || e.message === 'Failed to fetch' || e.message.includes('NetworkError') || e.name === 'TypeError')) {
                         await new Promise(r => setTimeout(r, 1000));
                         return fetchWithRetry(attempt - 1);
                     }
@@ -3733,11 +3766,8 @@
         async function fetchAmbientHistory(appKey, apiKey, macAddress) {
             if (!macAddress) return [];
             try {
-                var proxy = state.ambient.proxyUrl || '/';
                 var ambientUrl = `https://rt.ambientweather.net/v1/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
-
-                var proxyBase = proxy.replace(/\/+$/, '');
-                var url = proxy.endsWith('?') ? `${proxy}${ambientUrl}` : `${proxyBase}/api/devices/${encodeURIComponent(macAddress)}?applicationKey=${encodeURIComponent(appKey)}&apiKey=${encodeURIComponent(apiKey)}&limit=288`;
+                var url = buildAmbientProxyUrl(ambientUrl);
 
                 var res = await fetch(url);
                 if (!res.ok) throw new Error('History fetch failed');
@@ -4649,6 +4679,214 @@
             return hIdx;
         }
 
+        // --- Shared chart rendering (see DESIGN.md §9) ---
+        var CHART_PAD = { L: 36, R: 14, T: 18, B: 28 };
+
+        function hexToRgba(hex, alpha) {
+            var h = (hex || '').replace('#', '');
+            if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+            if (h.length !== 6) return 'rgba(0,0,0,' + alpha + ')';
+            var r = parseInt(h.substring(0, 2), 16);
+            var g = parseInt(h.substring(2, 4), 16);
+            var b = parseInt(h.substring(4, 6), 16);
+            return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+        }
+
+        // Single entry point for all popup chart rendering. Each renderXChart() prepares
+        // its series + scale, then calls this on every (re)draw. See DESIGN.md §9.
+        function drawTimeSeriesChart(opts) {
+            var canvas = opts.canvas;
+            if (!canvas) return;
+            var ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            var w = canvas.clientWidth;
+            var h = canvas.clientHeight;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
+
+            var series = opts.series;
+            if (!series && opts.points) {
+                series = [{ points: opts.points, color: opts.color, filled: opts.filled !== false }];
+            }
+            if (!series || !series.length) return;
+
+            var labels = opts.labels || [];
+            var nowIdx = (opts.nowIdx != null && opts.nowIdx >= 0) ? opts.nowIdx : null;
+            var hoverIdx = (opts.hoverIdx != null && opts.hoverIdx >= 0) ? opts.hoverIdx : null;
+            var yMin = opts.yMin;
+            var yMax = opts.yMax;
+            var yFormat = opts.yFormat || function (v) { return Math.round(v) + ''; };
+            var pointCount = series[0].points.length;
+
+            function xScale(i) {
+                if (pointCount <= 1) return padL;
+                return padL + (i * (w - padL - padR) / (pointCount - 1));
+            }
+            function yScale(v) {
+                var range = (yMax - yMin) || 1;
+                return padT + (yMax - v) * (h - padT - padB) / range;
+            }
+
+            // Read from <body> — dark-mode CSS variables are scoped to `body.dark-mode`,
+            // so getComputedStyle(documentElement) would always return the light values.
+            var cs = getComputedStyle(document.body);
+            var bgCol = (cs.getPropertyValue('--bg-color') || '#fff').trim();
+            var textCol = (cs.getPropertyValue('--text-color') || '#111').trim();
+            var accent = (cs.getPropertyValue('--accent-color') || '#f97316').trim();
+            var gridCol = (cs.getPropertyValue('--card-border') || 'rgba(0,0,0,0.1)').trim();
+
+            // Solid theme background — light zinc in light mode, dark zinc in dark mode
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = bgCol;
+            ctx.fillRect(0, 0, w, h);
+
+            // Solid horizontal grid lines, no dashing
+            ctx.strokeStyle = gridCol;
+            ctx.lineWidth = 1;
+            var gridLines = 4;
+            for (var g = 0; g <= gridLines; g++) {
+                var gy = padT + g * (h - padT - padB) / gridLines;
+                ctx.beginPath();
+                ctx.moveTo(padL, gy);
+                ctx.lineTo(w - padR, gy);
+                ctx.stroke();
+            }
+
+            // Thick bottom baseline only — no left axis (Y labels float against the grid)
+            ctx.strokeStyle = textCol;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(padL, h - padB);
+            ctx.lineTo(w - padR, h - padB);
+            ctx.stroke();
+
+            var scope = {
+                xScale: xScale, yScale: yScale,
+                padL: padL, padR: padR, padT: padT, padB: padB,
+                w: w, h: h,
+                textCol: textCol, gridCol: gridCol, accent: accent
+            };
+
+            if (typeof opts.beforeSeries === 'function') opts.beforeSeries(ctx, scope);
+
+            // Series: area fill (if requested) + line
+            for (var s = 0; s < series.length; s++) {
+                var sr = series[s];
+                var pts = sr.points;
+                var color = sr.color;
+
+                if (sr.filled) {
+                    var grad = ctx.createLinearGradient(0, padT, 0, h - padB);
+                    grad.addColorStop(0, hexToRgba(color, 0.28));
+                    grad.addColorStop(1, hexToRgba(color, 0));
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.moveTo(xScale(0), h - padB);
+                    for (var p = 0; p < pts.length; p++) {
+                        ctx.lineTo(xScale(p), yScale(pts[p]));
+                    }
+                    ctx.lineTo(xScale(pts.length - 1), h - padB);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+
+                ctx.save();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2.5;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                for (var p2 = 0; p2 < pts.length; p2++) {
+                    var x = xScale(p2);
+                    var y = yScale(pts[p2]);
+                    if (p2 === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // NOW marker: solid accent line + small "NOW" chip above the plot
+            if (nowIdx !== null && nowIdx < pointCount) {
+                var nx = xScale(nowIdx);
+                ctx.save();
+                ctx.strokeStyle = accent;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(nx, padT);
+                ctx.lineTo(nx, h - padB);
+                ctx.stroke();
+
+                var chipW = 32, chipH = 14;
+                var cx = nx - chipW / 2;
+                var cy = padT - chipH - 2;
+                if (cy < 0) cy = padT + 2;
+                if (cx < padL) cx = padL;
+                if (cx + chipW > w - padR) cx = w - padR - chipW;
+                ctx.fillStyle = accent;
+                ctx.fillRect(cx, cy, chipW, chipH);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 9px "Space Mono", monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('NOW', cx + chipW / 2, cy + chipH / 2 + 0.5);
+                ctx.restore();
+            }
+
+            if (typeof opts.afterSeries === 'function') opts.afterSeries(ctx, scope);
+
+            // Hover: vertical guide + dot per series, dots use accent color
+            if (hoverIdx !== null && hoverIdx < pointCount) {
+                var hx = xScale(hoverIdx);
+                ctx.save();
+                ctx.strokeStyle = textCol;
+                ctx.globalAlpha = 0.4;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(hx, padT);
+                ctx.lineTo(hx, h - padB);
+                ctx.stroke();
+                ctx.restore();
+
+                for (var hs = 0; hs < series.length; hs++) {
+                    var hpts = series[hs].points;
+                    var hv = hpts[hoverIdx];
+                    if (hv === undefined || hv === null || isNaN(hv)) continue;
+                    var hy = yScale(hv);
+                    ctx.fillStyle = accent;
+                    ctx.beginPath();
+                    ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = textCol;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+
+            // Y labels: three values (max / mid / min) right-aligned outside the plot
+            ctx.fillStyle = textCol;
+            ctx.font = 'bold 11px "Space Mono", monospace';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(yFormat(yMax), padL - 8, padT + 6);
+            ctx.fillText(yFormat((yMin + yMax) / 2), padL - 8, padT + (h - padT - padB) / 2);
+            ctx.fillText(yFormat(yMin), padL - 8, h - padB - 6);
+
+            // X labels
+            ctx.fillStyle = textCol;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.font = 'bold 10px "Space Mono", monospace';
+            var step = (state.timeFormat === '24') ? 3 : 4;
+            for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
+                var lx = xScale(tIdx);
+                var txt = labels[tIdx] || '';
+                ctx.fillText(txt, lx, h - padB + 8);
+            }
+        }
+
         function renderWindChart() {
             if (!els.modalExtra) return;
             if (!state.weatherData || !state.weatherData.hourly) {
@@ -4782,7 +5020,7 @@
                 <div class="text-left w-full">
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_WIND_SPEED</div>
-                        <div class="text-xs font-bold" style="color:#cbd5e1">${unit}</div>
+                        <div class="text-xs font-bold" style="color: #cbd5e1">${unit}</div>
                     </div>
 
                     <div class="relative">
@@ -4809,7 +5047,7 @@
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -4830,11 +5068,7 @@
 
             var w = cssW;
             var h = cssH;
-            // Padding tuned so the plot doesn't feel horizontally squished
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
             var minV = Math.min.apply(null, points);
             var maxV = Math.max.apply(null, points);
@@ -4842,183 +5076,25 @@
                 minV = Math.max(0, minV - 5);
                 maxV = maxV + 5;
             }
-            // Add a little headroom
             var range = maxV - minV;
             minV -= range * 0.1;
             maxV += range * 0.1;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            // Background (explicit fill to avoid transparent canvas tint)
-            var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-            ctx.clearRect(0, 0, w, h);
-            ctx.fillStyle = bgCol;
-            ctx.fillRect(0, 0, w, h);
-
-            // Grid
-            ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            var gridLines = 4;
-            for (var g = 0; g <= gridLines; g++) {
-                var y = padT + g * (h - padT - padB) / gridLines;
-                ctx.beginPath();
-                ctx.moveTo(padL, y);
-                ctx.lineTo(w - padR, y);
-                ctx.stroke();
-            }
-            ctx.setLineDash([]);
-
-            // Axes
-            ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(padL, padT);
-            ctx.lineTo(padL, h - padB);
-            ctx.lineTo(w - padR, h - padB);
-            ctx.stroke();
-
-            // Helper to draw base chart (and optional hover highlight)
-            var accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent-color') || '#f97316').trim();
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // Wind chart palette: light gray line/points (requested)
-            var windLineCol = '#cbd5e1'; // slate-300
-            var windPointCol = '#cbd5e1';
-            var windHoverFill = '#e2e8f0'; // slate-200
-
             function draw(hoverIdx) {
-                // Background (explicit fill to avoid unexpected canvas tint)
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = windLineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = windPointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // NOW marker (current hour)
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-
-                    // No text label (marker line only)
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    // Vertical guide
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    // Highlight point (draw in device pixels to guarantee a true circle)
-                    ctx.save();
-                    ctx.setTransform(1, 0, 0, 1, 0, 0);
-                    var hxDev = hx * dpr;
-                    var hyDev = hy * dpr;
-
-                    ctx.fillStyle = windPointCol;
-                    ctx.beginPath();
-                    ctx.arc(hxDev, hyDev, 6 * dpr, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2 * dpr;
-                    ctx.beginPath();
-                    ctx.arc(hxDev, hyDev, 6 * dpr, 0, Math.PI * 2);
-                    ctx.stroke();
-                    ctx.restore();
-                }
-
-                // Y labels (min/max)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(Math.round(maxV) + '', 6, padT + 6);
-                ctx.fillText(Math.round(minV) + '', 6, h - padB - 6);
-
-                // X labels (tuned for 24 points)
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#cbd5e1',
+                    filled: true,
+                    yFormat: function (v) { return Math.round(v) + ''; }
+                });
             }
 
-            // Initial draw
             draw(null);
 
             // Hover interaction (with tooltip + mini compass)
@@ -5200,7 +5276,7 @@
                 <div class="text-left w-full">
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_HUMIDITY</div>
-                        <div class="text-xs font-bold" style="color: rgb(29, 78, 216)">%</div>
+                        <div class="text-xs font-bold" style="color: #1d4ed8">%</div>
                     </div>
 
                     <div class="relative">
@@ -5211,12 +5287,12 @@
                             <div id="humidity-tooltip-time" class="font-bold opacity-60 tracking-widest">--:--</div>
                             <div class="mt-2">
                                 <div class="text-[0.7rem] font-bold opacity-60">HUMIDITY</div>
-                                <div id="humidity-tooltip-val" class="text-lg font-bold leading-none" style="color: rgb(29, 78, 216)">--%</div>
+                                <div id="humidity-tooltip-val" class="text-lg font-bold leading-none" style="color: #1d4ed8">--%</div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -5237,153 +5313,24 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
-            // Fixed scale for humidity
             var minV = 0;
             var maxV = 100;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // Humidity palette
-            var lineCol = 'rgba(29, 78, 216, 0.9)';
-            var pointCol = 'rgba(29, 78, 216, 0.95)';
-
-            function fillHumidityBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (dark blue top -> light blue bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(30, 64, 175, 0.22)');
-                grad.addColorStop(1, 'rgba(191, 219, 254, 0.14)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
-
             function draw(hoverIdx) {
-                fillHumidityBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = lineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = pointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // Current hour marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    ctx.fillStyle = pointCol;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Y labels (0 / 100)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('100', 6, padT + 6);
-                ctx.fillText('0', 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#1d4ed8',
+                    filled: true,
+                    yFormat: function (v) { return Math.round(v) + ''; }
+                });
             }
 
             draw(null);
@@ -5553,7 +5500,7 @@
                 <div class="text-left w-full">
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_UV_INDEX</div>
-                        <div class="text-xs font-bold" style="color:#a855f7">UV</div>
+                        <div class="text-xs font-bold" style="color: #a855f7">UV</div>
                     </div>
 
                     <div class="relative">
@@ -5564,12 +5511,12 @@
                             <div id="uv-tooltip-time" class="font-bold opacity-60 tracking-widest">--:--</div>
                             <div class="mt-2">
                                 <div class="text-[0.7rem] font-bold opacity-60">UV INDEX</div>
-                                <div id="uv-tooltip-val" class="text-lg font-bold leading-none" style="color:#a855f7">--</div>
+                                <div id="uv-tooltip-val" class="text-lg font-bold leading-none" style="color: #a855f7">--</div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -5590,153 +5537,24 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
-            // Fixed UV scale (0–11)
             var minV = 0;
             var maxV = 11;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // UV palette
-            var lineCol = 'rgba(147, 51, 234, 0.9)';
-            var pointCol = 'rgba(147, 51, 234, 0.95)';
-
-            function fillUVBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (dark purple top -> light purple bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(88, 28, 135, 0.22)');
-                grad.addColorStop(1, 'rgba(233, 213, 255, 0.14)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
-
             function draw(hoverIdx) {
-                fillUVBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = lineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = pointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // Current hour marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    ctx.fillStyle = pointCol;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Y labels (0 / 11)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('11', 6, padT + 6);
-                ctx.fillText('0', 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#a855f7',
+                    filled: true,
+                    yFormat: function (v) { return Math.round(v) + ''; }
+                });
             }
 
             draw(null);
@@ -5871,7 +5689,7 @@
                 <div class="text-left w-full">
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_VISIBILITY</div>
-                        <div class="text-xs font-bold" style="color: rgb(96, 165, 250)">${unit}</div>
+                        <div class="text-xs font-bold" style="color: #60a5fa">${unit}</div>
                     </div>
 
                     <div class="relative">
@@ -5882,12 +5700,12 @@
                             <div id="visibility-tooltip-time" class="font-bold opacity-60 tracking-widest">--:--</div>
                             <div class="mt-2">
                                 <div class="text-[0.7rem] font-bold opacity-60">VISIBILITY</div>
-                                <div id="visibility-tooltip-val" class="text-lg font-bold leading-none" style="color: rgb(96, 165, 250)">--</div>
+                                <div id="visibility-tooltip-val" class="text-lg font-bold leading-none" style="color: #60a5fa">--</div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -5908,10 +5726,7 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
             var minV = Math.min.apply(null, points);
             var maxV = Math.max.apply(null, points);
@@ -5924,144 +5739,19 @@
             maxV += range * 0.1;
             if (minV < 0) minV = 0;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // Visibility palette
-            var lineCol = 'rgba(96, 165, 250, 0.9)';
-            var pointCol = 'rgba(96, 165, 250, 0.95)';
-
-            function fillVisBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (light gray top -> light blue bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(203, 213, 225, 0.18)');
-                grad.addColorStop(1, 'rgba(191, 219, 254, 0.14)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
-
             function draw(hoverIdx) {
-                fillVisBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = lineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = pointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // Current hour marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    ctx.fillStyle = pointCol;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Y labels (min/max)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText((Math.round(maxV * 10) / 10).toFixed(1), 6, padT + 6);
-                ctx.fillText((Math.round(minV * 10) / 10).toFixed(1), 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#60a5fa',
+                    filled: true,
+                    yFormat: function (v) { return (Math.round(v * 10) / 10).toFixed(1); }
+                });
             }
 
             draw(null);
@@ -6254,7 +5944,7 @@
                 <div class="text-left w-full">
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_PRESSURE</div>
-                        <div class="text-xs font-bold" style="color: rgb(234, 179, 8)">${unitLabel}</div>
+                        <div class="text-xs font-bold" style="color: #eab308">${unitLabel}</div>
                     </div>
 
                     <div class="relative">
@@ -6265,12 +5955,12 @@
                             <div id="pressure-tooltip-time" class="font-bold opacity-60 tracking-widest">--:--</div>
                             <div class="mt-2">
                                 <div class="text-[0.7rem] font-bold opacity-60">PRESSURE</div>
-                                <div id="pressure-tooltip-val" class="text-lg font-bold leading-none" style="color: rgb(234, 179, 8)">--</div>
+                                <div id="pressure-tooltip-val" class="text-lg font-bold leading-none" style="color: #eab308">--</div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -6291,159 +5981,34 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
-            var minV = Math.min.apply(null, points);
-            var maxV = Math.max.apply(null, points);
-            if (minV === maxV) {
-                minV = minV - 2;
-                maxV = maxV + 2;
-            }
-            var range = maxV - minV;
-            minV -= range * 0.1;
-            maxV += range * 0.1;
+            // Pressure varies very little over 24h, so enforce a minimum Y range
+            // (~10 hPa or ~0.30 inHg) — otherwise a 1 hPa swing fills the canvas.
+            var isInHg = (state.pressureUnit === 'inHg');
+            var minRange = isInHg ? 0.30 : 10;
+            var rawMin = Math.min.apply(null, points);
+            var rawMax = Math.max.apply(null, points);
+            var center = (rawMin + rawMax) / 2;
+            var halfRange = Math.max((rawMax - rawMin) / 2, minRange / 2) * 1.1;
+            var minV = center - halfRange;
+            var maxV = center + halfRange;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // Pressure palette
-            var lineCol = 'rgba(234, 179, 8, 0.9)';
-            var pointCol = 'rgba(234, 179, 8, 0.95)';
-
-            function fillPressureBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (dark yellow top -> light yellow bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(161, 98, 7, 0.20)');
-                grad.addColorStop(1, 'rgba(254, 240, 138, 0.14)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
+            var pressurePrecision = isInHg ? 2 : 0;
 
             function draw(hoverIdx) {
-                fillPressureBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = lineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = pointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // Current hour marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    ctx.fillStyle = pointCol;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Y labels (min/max)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(Math.round(maxV) + '', 6, padT + 6);
-                ctx.fillText(Math.round(minV) + '', 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#eab308',
+                    filled: true,
+                    yFormat: function (v) { return v.toFixed(pressurePrecision); }
+                });
             }
 
             draw(null);
@@ -6483,7 +6048,7 @@
                     placeTooltip(x, y);
                 }
                 if (ttTime) ttTime.innerText = formatTime(times[idx]);
-                if (ttVal) ttVal.innerText = Math.round(points[idx]) + ' hPa';
+                if (ttVal) ttVal.innerText = points[idx].toFixed(pressurePrecision) + ' ' + (isInHg ? 'inHg' : 'hPa');
             }
 
             function onLeave() {
@@ -6637,7 +6202,7 @@
                     </div>
                     <div class="flex items-baseline justify-between gap-4 mb-2">
                         <div class="text-xs font-bold opacity-60 tracking-widest">TODAY_PRECIPITATION</div>
-                        <div class="text-xs font-bold" style="color: rgba(30, 64, 175, 0.95)">${unit}</div>
+                        <div class="text-xs font-bold" style="color: #1e40af">${unit}</div>
                     </div>
 
                     <div class="relative">
@@ -6648,12 +6213,12 @@
                             <div id="precip-tooltip-time" class="font-bold opacity-60 tracking-widest">--:--</div>
                             <div class="mt-2">
                                 <div class="text-[0.7rem] font-bold opacity-60">PRECIP</div>
-                                <div id="precip-tooltip-val" class="text-lg font-bold leading-none" style="color: rgba(30, 64, 175, 0.95)">--</div>
+                                <div id="precip-tooltip-val" class="text-lg font-bold leading-none" style="color: #1e40af">--</div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -6674,155 +6239,29 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
-            // Precip is often 0-heavy; use 0..max for clarity
+            // Precip is often 0-heavy; anchor to 0 for clarity
             var minV = 0;
             var maxV = Math.max.apply(null, points);
-            if (!isFinite(maxV) || maxV <= 0) maxV = (state.unit === 'f') ? 0.5 : 10; // sane scale when dry
+            if (!isFinite(maxV) || maxV <= 0) maxV = (state.unit === 'f') ? 0.5 : 10;
             maxV += maxV * 0.1;
 
-            function xScale(i) {
-                if (points.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (points.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
-            // Precip palette
-            var lineCol = 'rgba(30, 64, 175, 0.9)';
-            var pointCol = 'rgba(30, 64, 175, 0.95)';
-
-            function fillPrecipBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (dark blue top -> light blue bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(30, 64, 175, 0.20)');
-                grad.addColorStop(1, 'rgba(191, 219, 254, 0.14)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
+            var precipPrecision = (state.unit === 'f') ? 2 : 1;
 
             function draw(hoverIdx) {
-                fillPrecipBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // Line
-                ctx.strokeStyle = lineCol;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < points.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(points[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-
-                // Points
-                ctx.fillStyle = pointCol;
-                for (var q = 0; q < points.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(points[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-
-                // Current hour marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < points.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover highlight
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    var hy = yScale(points[hoverIdx]);
-
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.globalAlpha = 1;
-
-                    ctx.fillStyle = pointCol;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = textCol;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 6, 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Y labels (0 / max)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(maxV.toFixed(state.unit === 'f' ? 2 : 1), 6, padT + 6);
-                ctx.fillText('0', 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    points: points,
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    color: '#1e40af',
+                    filled: true,
+                    yFormat: function (v) { return v.toFixed(precipPrecision); }
+                });
             }
 
             draw(null);
@@ -7070,11 +6509,11 @@
                             <div class="mt-2 grid grid-cols-2 gap-3">
                                 <div>
                                     <div class="text-[0.7rem] font-bold opacity-60">REAL</div>
-                                    <div id="temp-tooltip-real" class="text-lg font-bold leading-none" style="color:#cbd5e1">--</div>
+                                    <div id="temp-tooltip-real" class="text-lg font-bold leading-none" style="color: #cbd5e1">--</div>
                                 </div>
                                 <div>
                                     <div class="text-[0.7rem] font-bold opacity-60">FEELS</div>
-                                    <div id="temp-tooltip-feels" class="text-lg font-bold leading-none" style="color:#86efac">--</div>
+                                    <div id="temp-tooltip-feels" class="text-lg font-bold leading-none" style="color: #86efac">--</div>
                                 </div>
                             </div>
                             <div class="mt-2 text-[0.7rem] font-bold opacity-60">
@@ -7083,7 +6522,7 @@
                         </div>
                     </div>
 
-                    <div class="mt-2 text-[0.75rem] opacity-60 leading-snug">
+                    <div class="mt-2 text-xs opacity-60 leading-snug">
                         HOVER_OVER_GRAPH_TO_HIGHLIGHT
                     </div>
                 </div>
@@ -7111,16 +6550,10 @@
 
             var w = cssW;
             var h = cssH;
-            var padL = 18;
-            var padR = 10;
-            var padT = 10;
-            var padB = 26;
+            var padL = CHART_PAD.L, padR = CHART_PAD.R, padT = CHART_PAD.T, padB = CHART_PAD.B;
 
-            function minArr(a) { return Math.min.apply(null, a); }
-            function maxArr(a) { return Math.max.apply(null, a); }
-
-            var minV = Math.min(minArr(realPts), minArr(feelPts));
-            var maxV = Math.max(maxArr(realPts), maxArr(feelPts));
+            var minV = Math.min(Math.min.apply(null, realPts), Math.min.apply(null, feelPts));
+            var maxV = Math.max(Math.max.apply(null, realPts), Math.max.apply(null, feelPts));
             if (hi !== null) maxV = Math.max(maxV, hi);
             if (lo !== null) minV = Math.min(minV, lo);
 
@@ -7132,191 +6565,66 @@
             minV -= range * 0.12;
             maxV += range * 0.12;
 
-            function xScale(i) {
-                if (realPts.length <= 1) return padL;
-                return padL + (i * (w - padL - padR) / (realPts.length - 1));
-            }
-            function yScale(v) {
-                return padT + (maxV - v) * (h - padT - padB) / (maxV - minV);
-            }
-
-            var accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent-color') || '#f97316').trim();
-            var textCol = (getComputedStyle(document.documentElement).getPropertyValue('--text-color') || '#111').trim();
-            var gridCol = (getComputedStyle(document.documentElement).getPropertyValue('--card-border') || 'rgba(0,0,0,0.15)').trim();
-
             var realLineCol = '#cbd5e1';
             var feelsLineCol = '#86efac';
 
-            function fillBackground() {
-                // Base theme background
-                var bgCol = (getComputedStyle(document.documentElement).getPropertyValue('--bg-color') || '#ffffff').trim();
-                ctx.clearRect(0, 0, w, h);
-                ctx.fillStyle = bgCol;
-                ctx.fillRect(0, 0, w, h);
-
-                // Subtle vertical gradient overlay (red top -> blue bottom)
-                var grad = ctx.createLinearGradient(0, 0, 0, h);
-                grad.addColorStop(0, 'rgba(239, 68, 68, 0.16)');  // red (faded)
-                grad.addColorStop(1, 'rgba(59, 130, 246, 0.14)'); // blue (faded)
-                ctx.fillStyle = grad;
-                ctx.fillRect(0, 0, w, h);
-            }
-
-            function drawHighLowLines() {
-                ctx.save();
-                ctx.setLineDash([6, 6]);
-                ctx.lineWidth = 2;
-                ctx.globalAlpha = 0.35;
-                ctx.strokeStyle = textCol;
-
-                if (hi !== null && hi !== undefined) {
-                    var yH = yScale(hi);
-                    ctx.beginPath();
-                    ctx.moveTo(padL, yH);
-                    ctx.lineTo(w - padR, yH);
-                    ctx.stroke();
-                }
-                if (lo !== null && lo !== undefined) {
-                    var yL = yScale(lo);
-                    ctx.beginPath();
-                    ctx.moveTo(padL, yL);
-                    ctx.lineTo(w - padR, yL);
-                    ctx.stroke();
-                }
-                ctx.restore();
-            }
-
-            function drawSeriesLine(series, color) {
-                ctx.strokeStyle = color;
-                ctx.lineWidth = 3;
-                ctx.beginPath();
-                for (var p = 0; p < series.length; p++) {
-                    var x = xScale(p);
-                    var y = yScale(series[p]);
-                    if (p === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-            }
-
-            function drawSeriesPoints(series, color) {
-                ctx.fillStyle = color;
-                for (var q = 0; q < series.length; q++) {
-                    var px = xScale(q);
-                    var py = yScale(series[q]);
-                    ctx.beginPath();
-                    ctx.arc(px, py, 3, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            }
-
-            function drawSpecialPoint(idx, value, fillCol) {
-                var x = xScale(idx);
-                var y = yScale(value);
-                ctx.fillStyle = fillCol;
-                ctx.beginPath();
-                ctx.arc(x, y, 6, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.arc(x, y, 6, 0, Math.PI * 2);
-                ctx.stroke();
-            }
-
             function draw(hoverIdx) {
-                fillBackground();
-
-                // Grid
-                ctx.strokeStyle = gridCol;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                var gridLines = 4;
-                for (var g = 0; g <= gridLines; g++) {
-                    var gy = padT + g * (h - padT - padB) / gridLines;
-                    ctx.beginPath();
-                    ctx.moveTo(padL, gy);
-                    ctx.lineTo(w - padR, gy);
-                    ctx.stroke();
-                }
-                ctx.setLineDash([]);
-
-                // Axes
-                ctx.strokeStyle = textCol;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(padL, padT);
-                ctx.lineTo(padL, h - padB);
-                ctx.lineTo(w - padR, h - padB);
-                ctx.stroke();
-
-                // High/Low dashed lines
-                drawHighLowLines();
-
-                // Series
-                drawSeriesLine(realPts, realLineCol);
-                drawSeriesLine(feelPts, feelsLineCol);
-                drawSeriesPoints(realPts, realLineCol);
-                drawSeriesPoints(feelPts, feelsLineCol);
-
-                // Highlight hourly max/min points on REAL
-                if (realPts.length) {
-                    drawSpecialPoint(hiIdx, realPts[hiIdx], realLineCol);
-                    drawSpecialPoint(loIdx, realPts[loIdx], realLineCol);
-                }
-
-                // NOW marker
-                if (nowIdx !== null && nowIdx !== undefined && nowIdx >= 0 && nowIdx < realPts.length) {
-                    var nx = xScale(nowIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.55;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([6, 6]);
-                    ctx.beginPath();
-                    ctx.moveTo(nx, padT);
-                    ctx.lineTo(nx, h - padB);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-                }
-
-                // Hover
-                if (hoverIdx !== null && hoverIdx !== undefined) {
-                    var hx = xScale(hoverIdx);
-                    ctx.save();
-                    ctx.strokeStyle = textCol;
-                    ctx.globalAlpha = 0.35;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.moveTo(hx, padT);
-                    ctx.lineTo(hx, h - padB);
-                    ctx.stroke();
-                    ctx.restore();
-
-                    // Hover circles for both series
-                    drawSpecialPoint(hoverIdx, realPts[hoverIdx], realLineCol);
-                    drawSpecialPoint(hoverIdx, feelPts[hoverIdx], feelsLineCol);
-                }
-
-                // Y labels (min/max)
-                ctx.fillStyle = textCol;
-                ctx.font = 'bold 10px "Space Mono", monospace';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(Math.round(maxV) + '', 6, padT + 6);
-                ctx.fillText(Math.round(minV) + '', 6, h - padB - 6);
-
-                // X labels
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.font = 'bold 9px "Space Mono", monospace';
-                var step = (state.timeFormat === '24') ? 3 : 4;
-                for (var tIdx = 0; tIdx < labels.length; tIdx += step) {
-                    var lx = xScale(tIdx);
-                    var txt = labels[tIdx] || '';
-                    ctx.fillText(txt, lx, h - padB + 4);
-                }
+                drawTimeSeriesChart({
+                    canvas: canvas,
+                    series: [
+                        { points: realPts, color: realLineCol, filled: true },
+                        { points: feelPts, color: feelsLineCol, filled: false }
+                    ],
+                    labels: labels,
+                    nowIdx: nowIdx,
+                    hoverIdx: (hoverIdx == null ? null : hoverIdx),
+                    yMin: minV,
+                    yMax: maxV,
+                    yFormat: function (v) { return Math.round(v) + ''; },
+                    // Daily high/low guide lines drawn under the series
+                    beforeSeries: function (ctx, sc) {
+                        if (hi == null && lo == null) return;
+                        ctx.save();
+                        ctx.setLineDash([6, 6]);
+                        ctx.lineWidth = 1.5;
+                        ctx.globalAlpha = 0.35;
+                        ctx.strokeStyle = sc.textCol;
+                        if (hi != null) {
+                            var yH = sc.yScale(hi);
+                            ctx.beginPath();
+                            ctx.moveTo(sc.padL, yH);
+                            ctx.lineTo(sc.w - sc.padR, yH);
+                            ctx.stroke();
+                        }
+                        if (lo != null) {
+                            var yL = sc.yScale(lo);
+                            ctx.beginPath();
+                            ctx.moveTo(sc.padL, yL);
+                            ctx.lineTo(sc.w - sc.padR, yL);
+                            ctx.stroke();
+                        }
+                        ctx.restore();
+                    },
+                    // Today's actual hi/lo markers on the REAL series, in series color
+                    afterSeries: function (ctx, sc) {
+                        if (!realPts.length) return;
+                        function dot(idx, value, fillCol) {
+                            var x = sc.xScale(idx);
+                            var y = sc.yScale(value);
+                            ctx.fillStyle = fillCol;
+                            ctx.beginPath();
+                            ctx.arc(x, y, 5, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.strokeStyle = sc.textCol;
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+                            ctx.arc(x, y, 5, 0, Math.PI * 2);
+                            ctx.stroke();
+                        }
+                        dot(hiIdx, realPts[hiIdx], realLineCol);
+                        dot(loIdx, realPts[loIdx], realLineCol);
+                    }
+                });
             }
 
             function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }

@@ -39,6 +39,12 @@ Four `<section>`s inside `#page-container`: WEATHER (0), RADAR (1), SETTINGS (2)
 ### Radar
 Leaflet map with two tile layers: RainViewer precipitation frames (fetched from `api.rainviewer.com/public/weather-maps.json`) and an Open-Meteo-sampled temperature grid. Frames are minute-scrubbed via `state.radar.{minTimeSec, maxTimeSec, selectedTimeSec}`; tile layers are double-buffered (`rainviewer` + `rainviewerPending`) to avoid flashes on frame swap.
 
+## Design system
+
+`DESIGN.md` at the repo root is the source of truth for visual design — color tokens, typography scale, border widths, component patterns (cards, buttons, inputs, modals), chart palette, iconography. **Read it before adding or modifying any UI, and follow it.** If a deliberate exception is needed, update `DESIGN.md` in the same change so the rule and its carve-out land together.
+
+In short: monospace brutalism — `'Space Mono'` only, `font-bold` default, `tracking-widest` UPPERCASE for labels, `border-4` outlines on cards/buttons/inputs, sharp corners (no `rounded-*` except `rounded-full` for circular UI), hard offset shadows (`Npx Npx 0px ...`), CSS variables (`--accent-color`, `--text-color`, etc.) for anything that themes. Per-metric chart colors live in §6 of `DESIGN.md` — use those hex values, not `rgb()`/`rgba()`, for solid colors.
+
 ## Working in this codebase
 
 - The file is large but flat — `grep -n` for a function name or DOM id is the fastest way to navigate. Element refs are cached on a global `els` object built in `init()` (line 1982+).
