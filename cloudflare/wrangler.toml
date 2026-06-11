@@ -1,0 +1,9 @@
+name = "mono-weather-ambient"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# Free workers.dev subdomain is enabled by default; the deployed URL is
+#   https://mono-weather-ambient.<your-subdomain>.workers.dev
+# No build step, no bindings, no secrets — the app passes the Ambient keys
+# as query params per request.
+workers_dev = true

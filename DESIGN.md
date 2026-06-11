@@ -200,6 +200,52 @@ Don't add a third icon library. If you need a glyph that's not in either, draw a
 
 ---
 
-## 9. When in doubt
+## 9. Popup charts
+
+All seven detail-popup charts (wind, temperature, humidity, UV, visibility, pressure, precipitation) share a single renderer: `drawTimeSeriesChart(opts)` in `index.html` (search for `function drawTimeSeriesChart`). When adding a new chart, use this helper — do not write a one-off canvas renderer.
+
+### What every chart gets
+
+- **Background**: solid fill in `--bg-color` (light zinc in light mode, dark zinc in dark mode). This is intentionally distinct from the surrounding `--card-bg` modal so the chart reads as a framed panel; the `border-2 border-[var(--text-color)]` on the canvas element completes the frame. Use `--bg-color`, not `--card-bg` — the latter is translucent and lets a tint bleed through from below.
+- **Grid**: 5 evenly-spaced horizontal lines, solid 1-px `--card-border`. No vertical gridlines, no dashed lines.
+- **Baseline**: one thick (2-px) `--text-color` line along the bottom of the plot. No left axis.
+- **Data line**: 2.5-px stroke in the chart's metric color (§6), `lineCap: 'round'`, `lineJoin: 'round'`.
+- **Area fill**: vertical gradient from `metricColor @ 0.28` at top to `metricColor @ 0` at bottom under the line. Always on for single-series charts; on for the primary series in multi-series charts (the temp REAL line, not FEELS).
+- **NOW marker**: solid 2-px `--accent-color` vertical line at the current hour, with a small `NOW` chip in the accent color above the plot. This is the only place inside a chart that uses the accent — it makes "right now" visually pop without conflicting with the metric color.
+- **Hover guide**: 1.5-px `--text-color` vertical line at 40 % opacity, plus a 5-px filled dot in `--accent-color` stroked with `--text-color` at full opacity for each series.
+- **Y labels**: three values (max / mid / min) right-aligned 8 px outside the plot, `bold 11px Space Mono`.
+- **X labels**: every 3rd point in 24-h mode (every 4th in 12-h), `bold 10px Space Mono`, centered under the baseline.
+- **Padding** is governed by the global `CHART_PAD = { L: 36, R: 14, T: 18, B: 28 }` constant. Don't override per-chart.
+
+### Per-chart variables
+
+Each `renderXChart()` only specifies its own data and units:
+
+```js
+drawTimeSeriesChart({
+    canvas, points, labels, nowIdx, hoverIdx,
+    yMin, yMax,
+    color: '#1d4ed8',         // §6 metric color
+    filled: true,
+    yFormat: (v) => Math.round(v) + ''
+});
+```
+
+For multi-series charts (temperature), pass `series: [{ points, color, filled }, ...]` instead of `points`/`color`/`filled`.
+
+### Chart-specific decoration
+
+Use the `beforeSeries` and `afterSeries` opt callbacks for anything that doesn't fit the common renderer (e.g. the temp chart's daily high/low dashed guide lines drawn under the data, and its hi/lo dot markers drawn over it). The callback receives `(ctx, scope)` where `scope` exposes `xScale`, `yScale`, padding, dimensions, and the resolved theme colors. **Don't** re-implement bg/grid/baseline/NOW/hover/labels in a callback — those are the helper's job.
+
+### Don't
+
+- Don't draw static data points along every line. They add noise; only show points on hover or for genuinely-significant values (today's hi/lo).
+- Don't add a left axis line — the grid + Y labels are enough.
+- Don't use dashed gridlines.
+- Don't fill the whole canvas with a metric-tinted gradient overlay; the area fill below the line carries the color signal.
+- Don't override font sizes/families inside a chart — `bold 10/11px "Space Mono", monospace` is the only chart font.
+- Don't introduce a chart library (Chart.js, D3, etc.) for these popups. The shared canvas helper covers the design with ~200 lines.
+
+## 10. When in doubt
 
 Find the closest existing element and copy its classes verbatim. Consistency beats cleverness. If you genuinely need a new pattern, add it here in the same PR so the next contributor inherits the decision.
