@@ -52,6 +52,9 @@ export default async (req) => {
     }
 };
 
+// The app derives the proxy path from the upstream Ambient URL, so same-origin
+// requests arrive as /v1/devices[/:mac] (see index.html buildAmbientProxyUrl).
+// /api/devices[/:mac] is kept as an alias. segments[2] is the mac in both shapes.
 export const config = {
-    path: ['/api/devices', '/api/devices/*']
+    path: ['/v1/devices', '/v1/devices/*', '/api/devices', '/api/devices/*']
 };
