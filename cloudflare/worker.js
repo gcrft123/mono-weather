@@ -21,7 +21,7 @@ const ALLOWED_PREFIX = '/v1/devices';
 // and other opaque origins (the app's local/static fallback). Add a custom
 // domain here if you point one at the Netlify site.
 const ALLOWED_ORIGINS = new Set([
-    'https://monow.netlify.app',
+    'monow.netlify.app',
     'null'
 ]);
 
